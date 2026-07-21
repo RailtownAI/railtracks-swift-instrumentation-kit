@@ -33,7 +33,7 @@ There are two ways to use it:
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/FabricioSffair/RailtracksInstrumentationKit.git", branch: "main")
+    .package(url: "https://github.com/RailtownAI/railtracks-swift-instrumentation-kit.git", branch: "main")
 ],
 targets: [
     .target(
@@ -46,7 +46,7 @@ targets: [
 ### Xcode
 
 File → Add Package Dependencies… → paste
-`https://github.com/FabricioSffair/RailtracksInstrumentationKit.git`.
+`https://github.com/RailtownAI/railtracks-swift-instrumentation-kit.git`.
 
 ### Local path (while iterating)
 
