@@ -205,15 +205,14 @@ public enum RailtracksSignposts {
     /// dropping the handle silently leaves the interval open and the bar
     /// extends forever on the timeline.
     public static func begin(_ event: AgentRun) -> AgentRunHandle {
-        let index = nextAgentIndex(forRun: event.runId)
-        // Prepend the start-order index to the name so the Agent Runs lane
-        // labels each swimlane "000 Name", "001 Name", … and orders them.
-        // Zero-padded to 3 digits because the lane sorts swimlanes lexically
-        // by name — without padding "10 X" would sort before "2 X". The SDK
-        // assigns indices incrementally and can't know the final count, so a
-        // fixed width is used (caps clean ordering at 999 agents per run).
-        let displayName = "\(String(format: "%03d", index)) \(event.name)"
-        log.trace("begin AgentRun name=\(event.name) index=\(index)")
+        // Prefix the name with "<run ordinal>-<start index>" so the Agent
+        // Runs lane, which orders swimlanes lexically by name, reads as
+        // "flows in start order, agents in start order within each flow".
+        // See AgentRunIndexer for the format and its rationale.
+        let slot = agentRunIndexer.next(forRun: event.runId)
+        let index = slot.index
+        let displayName = AgentRunIndexer.laneName(slot, name: event.name)
+        log.trace("begin AgentRun name=\(event.name) run=\(slot.runOrdinal) index=\(index)")
         let id = signposter.makeSignpostID()
         // Seed error=0 at begin so the AgentRun "error" column has a defined value
         // while the interval is open. Instruments parses that column as an unsigned
@@ -233,7 +232,10 @@ public enum RailtracksSignposts {
             name=\(displayName, privacy: .public)
             """
         )
-        return AgentRunHandle(id: id, state: state, name: displayName, index: index)
+        return AgentRunHandle(
+            id: id, state: state, name: displayName,
+            index: index, runOrdinal: slot.runOrdinal
+        )
     }
 
     /// Close an interval previously opened with `begin(_:)`. `error: true`
@@ -252,20 +254,10 @@ public enum RailtracksSignposts {
 
     // MARK: - Internal
 
-    /// Per-run monotonic counter. `begin(_:)` assigns the next index for the
-    /// event's `runId`, so agents are numbered 0, 1, 2, … in the order they
-    /// start *within that run* — for a live producer, start order is begin
-    /// order. Keyed by runId so each run restarts at 0. Mutex-guarded for
-    /// concurrent begins.
-    private static let agentRunCounters = Mutex<[String: Int]>([:])
-
-    private static func nextAgentIndex(forRun runId: String) -> Int {
-        agentRunCounters.withLock { counters in
-            let next = counters[runId, default: 0]
-            counters[runId] = next + 1
-            return next
-        }
-    }
+    /// Process-wide counters behind `begin(_:)`: a first-seen ordinal per
+    /// `runId` and a per-run agent start index. For a live producer, start
+    /// order is begin order.
+    private static let agentRunIndexer = AgentRunIndexer()
 
     private static func sanitize(_ s: String) -> String {
         s.replacingOccurrences(of: "\\", with: "\\\\")

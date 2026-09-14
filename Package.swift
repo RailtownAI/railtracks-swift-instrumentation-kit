@@ -31,6 +31,11 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log")
             ],
             path: "Sources/RailtracksInstrumentationKit"
+        ),
+        .testTarget(
+            name: "RailtracksInstrumentationKitTests",
+            dependencies: ["RailtracksInstrumentationKit"],
+            path: "Tests/RailtracksInstrumentationKitTests"
         )
     ]
 )

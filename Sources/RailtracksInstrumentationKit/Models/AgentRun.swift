@@ -48,4 +48,8 @@ public struct AgentRunHandle: Sendable {
     /// The 0-based start-order index the SDK assigned within this run.
     /// Exposed for callers that want to log or correlate it.
     public let index: Int
+    /// The 0-based ordinal of this run among all runs the process has
+    /// begun an agent for, in first-seen order. Together with `index` it
+    /// forms the lane-name prefix (`"<runOrdinal>-<index> name"`).
+    public let runOrdinal: Int
 }
