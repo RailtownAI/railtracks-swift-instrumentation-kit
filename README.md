@@ -144,6 +144,18 @@ RailtracksSignposts.emit(FlowIO(
 The handle pairs the two signposts so Instruments draws a duration bar on the
 **Agent Runs** lane (one swimlane per agent name; red on error).
 
+The lane orders swimlanes by plain string comparison of the name, so `begin`
+prefixes the name with a sortable key: `"<run>-<index> Name"`, e.g.
+`"00-000 Orchestrator"`, `"00-001 draft_email"`, `"01-000 Orchestrator"`.
+`run` is the 0-based ordinal of the `runId` among all runs this process has
+begun an agent for (first-seen order); `index` is the 0-based start order of
+the agent within that run. A recording that contains several flows therefore
+reads top-to-bottom as "flows in the order they started, agents in the order
+they started within each flow", and two flows whose root agent shares a name
+get separate lanes. Both numbers are exposed on the handle (`runOrdinal`,
+`index`). Pass a `runId` that is stable for the whole flow and distinct
+between flows, or every agent lands in one run.
+
 ```swift
 let handle = RailtracksSignposts.begin(AgentRun(
     name: "Orchestrator",
