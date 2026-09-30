@@ -172,6 +172,55 @@ defer { RailtracksSignposts.end(handle, error: didFail) }
 Dropping the handle leaves the interval open and the bar runs forever — always
 `end` it (a `defer` is the safest pattern).
 
+`AgentRun` remains for older SDK versions. SDKs that emit one interval per node
+call use `NodeRun` below.
+
+### Interval events (node durations)
+
+`NodeRun` is one interval per node call — agent, tool, or function — nested
+under its caller. Like `AgentRun`, `begin` returns a handle you must pass to
+`end`; Instruments draws the bar on the **Node Runs** lane (red on error,
+otherwise purple for agents, blue for tools, green for anything else).
+
+Each call lands in a lane named `"<key> Name"`, where the key nests under the
+caller's lane: `"00-000 MathWorkflow"`, `"00-000.000 Math Agent"`,
+`"00-000.000.000 add"`, `"00-000.000.001 multiply"`. A root key is
+`<run>-<root>` (the run's first-seen ordinal, then the root lane's order within
+the run); a child appends `.<child>`, the lane's order under its caller. Sorted
+as strings, the lanes read as the call tree.
+
+- **Parent lookup.** A call nests under the lane of the *live* call whose
+  `nodeId` equals its `parentNodeId`. Begin the caller before its children.
+  An empty, unknown, or already-ended `parentNodeId` gets a root lane.
+- **Shared lanes.** Every call of the same node (`nodeType` + `name`) under the
+  same caller lane shares one lane, so repeated tool calls line up. The same
+  node under a different caller gets its own lane there.
+- **Slots.** Calls that overlap in one lane get distinct slots (the lowest
+  free one, from 0), shown as sub-rows. `end` releases the slot.
+
+```swift
+let agent = RailtracksSignposts.begin(NodeRun(
+    name: "Math Agent",
+    nodeType: .agent,
+    nodeId: agentNode.id,
+    parentNodeId: "",         // "" for a root call
+    sessionId: session,
+    runId: run
+))
+defer { RailtracksSignposts.end(agent, error: didFail) }
+
+let tool = RailtracksSignposts.begin(NodeRun(
+    name: "add", nodeType: .tool,
+    nodeId: toolNode.id, parentNodeId: agentNode.id,
+    sessionId: session, runId: run, parentName: "Math Agent"
+))
+// ... run the tool ...
+RailtracksSignposts.end(tool)
+```
+
+The handle exposes the assigned `lane` and `slot`. An un-ended handle leaves
+the bar open and keeps its slot held.
+
 ---
 
 ## Usage — turnkey replay from RTSFlowGraph JSON
@@ -207,7 +256,8 @@ JSON; use live emission when you control the agent code directly.
 | `FlowTreeNode`  | Flow Tree, Call Tree  | `nodeId`, `sessionId`, `runId`, `nodeType`, `name`                               |
 | `FlowGraphNode` | Flow Object Graph     | `nodeId`, `sessionId`, `runId`, `nodeType`, `name`                              |
 | `FlowIO`        | Tool I/O              | `nodeId`, `sessionId`, `runId`, `messageId`, `source`, `direction`, `role`, `displayRole`, `toolName`, `content` |
-| `AgentRun`      | Agent Runs (timeline) | `name` (plus `nodeId`/`sessionId`/`runId`/`parentName` for correlation)          |
+| `NodeRun`       | Node Runs (timeline)  | `name`, `nodeType`; `nodeId`/`parentNodeId` for nesting (plus `sessionId`/`runId`/`parentName`) |
+| `AgentRun`      | Agent Runs (timeline) | `name` (plus `nodeId`/`sessionId`/`runId`/`parentName` for correlation); older SDK versions |
 
 All other fields have defaults. Every event type is `Sendable` + `Codable`, so
 you can build them on background tasks, serialize, queue, or replay.
@@ -228,7 +278,7 @@ public enum NodeType { case agent, tool, custom(String) }
 `.agent` and `.tool` are the types the Instruments schema styles specially
 (`.agent` → purple/sparkles; everything else → blue/wrench). `.custom("…")`
 preserves any other type losslessly — it renders like a Tool but keeps its real
-name in the Type columns. The on-the-wire value is `nodeType.rawValue`
+name in the Type columns (on the Node Runs lane it is colored green). The on-the-wire value is `nodeType.rawValue`
 (`"Agent"` / `"Tool"` / the custom string), so the enum doesn't change the
 signpost format. `FlowGraphNode.parentType` is an optional `NodeType?` — `nil`
 for a root, otherwise it must equal the parent's `nodeType` (see above).
@@ -340,7 +390,8 @@ Then start a recording with the **Railtracks Instrumentation** template.
 | Flow Object Graph   | `FlowGraphNode`              | directed parent→child node graph                      |
 | Tool I/O            | `FlowIO`                     | per-tool input/output messages                        |
 | Call Tree           | `FlowTreeNode`               | backtraces with source-jump to the emit site          |
-| Agent Runs          | `AgentRun`                   | per-agent duration bars on a timeline                 |
+| Node Runs           | `NodeRun`                    | per-node-call duration bars, nested by caller         |
+| Agent Runs          | `AgentRun`                   | per-agent duration bars (older SDK versions)          |
 
 ---
 
@@ -350,7 +401,7 @@ The library emits diagnostic logs via [`apple/swift-log`](https://github.com/app
 following the [Swift library log-level guidance](https://www.swift.org/documentation/server/guides/libraries/log-levels.html):
 
 - **`.trace`** — one line per emitted event (`FlowTreeNode`/`FlowGraphNode`/
-  `FlowIO`, `AgentRun` begin/end) and per benign skip (tool nodes with no
+  `FlowIO`, `NodeRun`/`AgentRun` begin/end) and per benign skip (tool nodes with no
   `llm_details`, deduplicated edges).
 - **`.debug`** — per-call summaries (`emit(data:)` node/edge/IO counts, parsed
   run/root counts).

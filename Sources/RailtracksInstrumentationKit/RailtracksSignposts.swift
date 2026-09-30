@@ -199,6 +199,9 @@ public enum RailtracksSignposts {
     }
 
     // MARK: - AgentRun (interval)
+    //
+    // One interval per agent. Kept for older SDK versions; SDKs that emit
+    // one interval per node call use the NodeRun overloads below.
 
     /// Start an interval signpost for one agent's run. Returns a handle the
     /// caller MUST pass to `end(_:error:)` when the agent finishes —
@@ -252,12 +255,83 @@ public enum RailtracksSignposts {
         )
     }
 
+    // MARK: - NodeRun (interval)
+
+    /// Start an interval signpost for one node call (agent, tool, function).
+    /// Returns a handle the caller MUST pass to `end(_:error:)` when the
+    /// call finishes — dropping the handle leaves the interval open and
+    /// keeps its slot held, so later overlapping calls in the lane shift to
+    /// a higher sub-row.
+    ///
+    /// Begin the caller's interval before its children's: a child nests
+    /// under the lane of the live call whose `nodeId` equals its
+    /// `parentNodeId`, and falls back to a root lane when there is none.
+    public static func begin(_ event: NodeRun) -> NodeRunHandle {
+        // Lane "<key> <name>", where the key nests under the caller's lane
+        // ("00-000.001 add") so the Node Runs lane, which orders swimlanes
+        // lexically, reads as a call tree. See NodeLaneIndexer for the rules.
+        let assignment = nodeLaneIndexer.begin(
+            nodeId: event.nodeId,
+            parentNodeId: event.parentNodeId,
+            runId: event.runId,
+            nodeType: event.nodeType.rawValue,
+            name: event.name
+        )
+        log.trace("begin NodeRun name=\(event.name) type=\(event.nodeType.rawValue) lane=\(assignment.lane) slot=\(assignment.slot)")
+        let id = signposter.makeSignpostID()
+        // Seed error=0 at begin for the same reason as AgentRun: an unset
+        // unsigned column renders as UInt64.max while the interval is open.
+        let state = signposter.beginInterval(
+            "NodeRun",
+            id: id,
+            """
+            error=\(0, privacy: .public) \
+            nodeId=\(event.nodeId, privacy: .public) \
+            parentNodeId=\(event.parentNodeId, privacy: .public) \
+            sessionId=\(event.sessionId, privacy: .public) \
+            runId=\(event.runId, privacy: .public) \
+            nodeType=\(event.nodeType.rawValue, privacy: .public) \
+            slot=\(assignment.slot, privacy: .public) \
+            parentName=\(event.parentName, privacy: .public) \
+            name=\(assignment.lane, privacy: .public)
+            """
+        )
+        return NodeRunHandle(
+            id: id, state: state, nodeId: event.nodeId,
+            laneKey: assignment.key, token: assignment.token,
+            lane: assignment.lane, slot: assignment.slot
+        )
+    }
+
+    /// Close an interval previously opened with `begin(_:)` and release its
+    /// slot. `error: true` flips the bar to red in the Node Runs lane.
+    public static func end(_ handle: NodeRunHandle, error: Bool = false) {
+        log.trace("end NodeRun lane=\(handle.lane) error=\(error)")
+        signposter.endInterval(
+            "NodeRun",
+            handle.state,
+            """
+            error=\(error ? 1 : 0, privacy: .public) \
+            name=\(handle.lane, privacy: .public)
+            """
+        )
+        nodeLaneIndexer.end(
+            nodeId: handle.nodeId, laneKey: handle.laneKey,
+            slot: handle.slot, token: handle.token
+        )
+    }
+
     // MARK: - Internal
 
     /// Process-wide counters behind `begin(_:)`: a first-seen ordinal per
     /// `runId` and a per-run agent start index. For a live producer, start
     /// order is begin order.
     private static let agentRunIndexer = AgentRunIndexer()
+
+    /// Process-wide lane state behind `begin(_ event: NodeRun)`: run
+    /// ordinals, lane keys and counters (kept for the process), plus the
+    /// live calls and the slots they hold (released at `end`).
+    private static let nodeLaneIndexer = NodeLaneIndexer()
 
     private static func sanitize(_ s: String) -> String {
         s.replacingOccurrences(of: "\\", with: "\\\\")
