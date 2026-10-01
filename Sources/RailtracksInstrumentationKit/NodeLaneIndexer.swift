@@ -2,7 +2,7 @@
 //  NodeLaneIndexer.swift
 //  RailtracksInstrumentationKit
 //
-//  Assigns the lane and slot for each NodeRun interval.
+//  Assigns the lane, slot and type slot for each NodeRun interval.
 //
 //  The Node Runs lane creates one swimlane per distinct lane string and
 //  orders swimlanes lexically, so the lane string carries a sortable,
@@ -16,6 +16,12 @@
 //  nodeType; name), so every call of one node from one caller shares a
 //  lane. Calls that overlap within a lane get distinct slots (the lowest
 //  free one), which Instruments uses to put them on separate sub-rows.
+//
+//  Separately, each call takes a type slot for the fixed "Nodes / Agents /
+//  Tools" lanes: the lowest slot not held by another live call in the same
+//  type bucket ("Agent", "Tool", or "Other" for every other node type).
+//  Those lanes are global, so type slots are shared across all runs and
+//  lanes, not per lane.
 //
 //  Kept as an instance type (rather than static state on RailtracksSignposts)
 //  so tests can drive a private instance deterministically.
@@ -33,11 +39,25 @@ final class NodeLaneIndexer: Sendable {
         let lane: String
         /// The lowest slot not held by another live call in this lane.
         let slot: Int
+        /// The type bucket the call's type slot belongs to.
+        let typeBucket: String
+        /// The lowest slot not held by another live call in `typeBucket`,
+        /// across all runs and lanes.
+        let typeSlot: Int
         /// Identifies this call in the live map; pass it back to `end`.
         let token: UInt64
     }
 
     /// Where a lane hangs: at the root of a run, or under a caller's lane.
+    /// The type-slot bucket for a `nodeType`: `"Agent"`, `"Tool"`, or
+    /// `"Other"` for everything else (including `"Function"`).
+    static func typeBucket(forNodeType nodeType: String) -> String {
+        switch nodeType {
+        case "Agent", "Tool": return nodeType
+        default: return "Other"
+        }
+    }
+
     private enum Scope: Hashable {
         case root(runId: String)
         case child(parentKey: String)
@@ -61,12 +81,13 @@ final class NodeLaneIndexer: Sendable {
         var laneKeys: [LaneIdentity: String] = [:]
         var liveCalls: [String: LiveCall] = [:]
         var heldSlots: [String: Set<Int>] = [:]
+        var heldTypeSlots: [String: Set<Int>] = [:]
         var nextToken: UInt64 = 0
     }
 
     private let state = Mutex(State())
 
-    /// Assign the lane and slot for a call that is starting, and record it
+    /// Assign the lane, slot and type slot for a call that is starting, and record it
     /// as live so calls naming it as their parent nest under its lane.
     /// Safe to call concurrently.
     func begin(
@@ -120,6 +141,13 @@ final class NodeLaneIndexer: Sendable {
             held.insert(slot)
             s.heldSlots[key] = held
 
+            let bucket = Self.typeBucket(forNodeType: nodeType)
+            var heldTypes = s.heldTypeSlots[bucket, default: []]
+            var typeSlot = 0
+            while heldTypes.contains(typeSlot) { typeSlot += 1 }
+            heldTypes.insert(typeSlot)
+            s.heldTypeSlots[bucket] = heldTypes
+
             let token = s.nextToken
             s.nextToken += 1
             // An empty nodeId can never be named as a parent, so it is not
@@ -128,18 +156,32 @@ final class NodeLaneIndexer: Sendable {
                 s.liveCalls[nodeId] = LiveCall(token: token, laneKey: key)
             }
 
-            return Assignment(key: key, lane: key + " " + name, slot: slot, token: token)
+            return Assignment(
+                key: key, lane: key + " " + name, slot: slot,
+                typeBucket: bucket, typeSlot: typeSlot, token: token
+            )
         }
     }
 
-    /// Release the call's slot and drop it from the live map. Lane keys and
+    /// Release the call's slot and type slot, and drop it from the live map. Lane keys and
     /// counters persist, so a later call of the same node from the same
     /// caller lands in the same lane.
-    func end(nodeId: String, laneKey: String, slot: Int, token: UInt64) {
+    func end(
+        nodeId: String,
+        laneKey: String,
+        slot: Int,
+        typeBucket: String,
+        typeSlot: Int,
+        token: UInt64
+    ) {
         state.withLock { s in
             s.heldSlots[laneKey]?.remove(slot)
             if s.heldSlots[laneKey]?.isEmpty == true {
                 s.heldSlots[laneKey] = nil
+            }
+            s.heldTypeSlots[typeBucket]?.remove(typeSlot)
+            if s.heldTypeSlots[typeBucket]?.isEmpty == true {
+                s.heldTypeSlots[typeBucket] = nil
             }
             // Only remove the entry this call created: a later call that
             // reused the nodeId owns it now.

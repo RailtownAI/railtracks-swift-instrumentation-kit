@@ -29,7 +29,10 @@ struct NodeLaneIndexerTests {
     }
 
     private func end(_ indexer: NodeLaneIndexer, _ a: NodeLaneIndexer.Assignment, id: String) {
-        indexer.end(nodeId: id, laneKey: a.key, slot: a.slot, token: a.token)
+        indexer.end(
+            nodeId: id, laneKey: a.key, slot: a.slot,
+            typeBucket: a.typeBucket, typeSlot: a.typeSlot, token: a.token
+        )
     }
 
     @Test("root lanes are '<run>-<root> name', counted per run, run ordinal is first-seen order")
@@ -152,6 +155,92 @@ struct NodeLaneIndexerTests {
         let child = begin(indexer, "add", .tool, id: "t", parent: "dup")
         #expect(child.lane == "00-000.000 add")
     }
+
+    // MARK: Type slots
+
+    @Test("overlapping agents in different lanes get type slots 0 and 1; a tool starts at 0")
+    func typeSlotsPerBucket() {
+        let indexer = NodeLaneIndexer()
+        let solver = begin(indexer, "Solver", .agent, id: "solver", run: "A")
+        let verifier = begin(indexer, "Verifier", .agent, id: "verifier", run: "B")
+        let tool = begin(indexer, "add", .tool, id: "t", parent: "solver", run: "A")
+        #expect(solver.lane != verifier.lane)
+        #expect([solver, verifier].map(\.slot) == [0, 0])
+        #expect(solver.typeBucket == "Agent")
+        #expect([solver, verifier].map(\.typeSlot) == [0, 1])
+        #expect(tool.typeBucket == "Tool")
+        #expect(tool.typeSlot == 0)
+    }
+
+    @Test("Function and other custom types share the 'Other' bucket")
+    func customTypesGoToOther() {
+        let indexer = NodeLaneIndexer()
+        let function = begin(indexer, "Workflow", .custom("Function"), id: "f")
+        let custom = begin(indexer, "Retriever", .custom("Retriever"), id: "r", parent: "f")
+        let agent = begin(indexer, "Agent", .agent, id: "a", parent: "f")
+        #expect(function.typeBucket == "Other")
+        #expect(custom.typeBucket == "Other")
+        #expect([function, custom].map(\.typeSlot) == [0, 1])
+        #expect(agent.typeSlot == 0)
+    }
+
+    @Test("end releases the type slot, so slot 0 is reused")
+    func typeSlotReleasedOnEnd() {
+        let indexer = NodeLaneIndexer()
+        let first = begin(indexer, "Solver", .agent, id: "solver")
+        let second = begin(indexer, "Verifier", .agent, id: "verifier")
+        end(indexer, first, id: "solver")
+        let third = begin(indexer, "Planner", .agent, id: "planner")
+        #expect(second.typeSlot == 1)
+        #expect(third.typeSlot == 0)
+    }
+}
+
+@Suite("RailtracksSignposts.sanitizeNodeRunInput")
+struct NodeRunInputSanitizerTests {
+
+    private let cap = RailtracksSignposts.nodeRunInputByteCap
+
+    @Test("newlines, tabs and space runs collapse to one space, and the ends are trimmed")
+    func collapsesAndTrims() {
+        let raw = "  \n\tPlan a trip\n\nto  Lisbon\t\tin May \r\n "
+        #expect(RailtracksSignposts.sanitizeNodeRunInput(raw) == "Plan a trip to Lisbon in May")
+    }
+
+    @Test("empty and whitespace-only input stays empty")
+    func emptyInput() {
+        #expect(RailtracksSignposts.sanitizeNodeRunInput("") == "")
+        #expect(RailtracksSignposts.sanitizeNodeRunInput(" \n\t ") == "")
+    }
+
+    @Test("input at the cap is unchanged")
+    func atCapUnchanged() {
+        let exact = String(repeating: "a", count: cap)
+        #expect(RailtracksSignposts.sanitizeNodeRunInput(exact) == exact)
+    }
+
+    @Test("ASCII over the cap is cut to exactly the cap, ending in '…'")
+    func asciiTruncation() {
+        let result = RailtracksSignposts.sanitizeNodeRunInput(String(repeating: "a", count: cap + 50))
+        #expect(result.utf8.count == cap)
+        #expect(result.hasSuffix("…"))
+        #expect(result.dropLast().allSatisfy { $0 == "a" })
+    }
+
+    @Test("multibyte truncation never splits a character and stays within the cap",
+          arguments: ["é", "😀", "👩‍👩‍👧", "aé😀"])
+    func multibyteTruncation(unit: String) {
+        let raw = String(repeating: unit, count: cap)
+        let result = RailtracksSignposts.sanitizeNodeRunInput(raw)
+        #expect(result.utf8.count <= cap)
+        #expect(result.hasSuffix("…"))
+        // Every kept character is a whole one from the source, in order.
+        let kept = String(result.dropLast())
+        #expect(raw.hasPrefix(kept))
+        #expect(kept.allSatisfy { unit.contains($0) })
+        // The cut wasted fewer bytes than one more source unit would take.
+        #expect(cap - result.utf8.count < unit.utf8.count)
+    }
 }
 
 /// End-to-end through the public API. Uses a fresh run id, so the outcome is
@@ -185,5 +274,7 @@ struct RailtracksSignpostsNodeRunTests {
         #expect(second.lane == first.lane)
         #expect(first.slot == 0)
         #expect(second.slot == 1)
+        // Type slots are process-wide, so only their relation is stable here.
+        #expect(second.typeSlot != first.typeSlot)
     }
 }

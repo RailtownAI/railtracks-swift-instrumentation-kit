@@ -197,6 +197,18 @@ as strings, the lanes read as the call tree.
   node under a different caller gets its own lane there.
 - **Slots.** Calls that overlap in one lane get distinct slots (the lowest
   free one, from 0), shown as sub-rows. `end` releases the slot.
+- **Type slots.** Alongside the call tree, every call also lands in one of
+  three fixed lanes: **Agents** (`.agent`), **Tools** (`.tool`), and **Nodes**
+  (everything else, including `"Function"`). Those lanes are global, so the
+  `typeSlot` is the lowest slot not held by another *live* call of the same
+  type, across all runs and lanes. Parallel calls of one type get separate
+  sub-rows; `end` releases the type slot too.
+- **Input.** `input` is a short summary of what the node received — the prompt
+  for an agent, the arguments for a tool — shown when you hover the bar. It is
+  emitted as a **public** signpost string, so it is readable by anyone with
+  the unified log; don't pass secrets. Whitespace runs collapse to one space,
+  and it is capped at 512 UTF-8 bytes (cut on a character boundary, ending in
+  "…"), which keeps the begin message under the unified log's ~1 KB limit.
 
 ```swift
 let agent = RailtracksSignposts.begin(NodeRun(
@@ -205,21 +217,23 @@ let agent = RailtracksSignposts.begin(NodeRun(
     nodeId: agentNode.id,
     parentNodeId: "",         // "" for a root call
     sessionId: session,
-    runId: run
+    runId: run,
+    input: prompt             // shown on hover; public in the unified log
 ))
 defer { RailtracksSignposts.end(agent, error: didFail) }
 
 let tool = RailtracksSignposts.begin(NodeRun(
     name: "add", nodeType: .tool,
     nodeId: toolNode.id, parentNodeId: agentNode.id,
-    sessionId: session, runId: run, parentName: "Math Agent"
+    sessionId: session, runId: run, parentName: "Math Agent",
+    input: #"{"a": 2, "b": 3}"#
 ))
 // ... run the tool ...
 RailtracksSignposts.end(tool)
 ```
 
-The handle exposes the assigned `lane` and `slot`. An un-ended handle leaves
-the bar open and keeps its slot held.
+The handle exposes the assigned `lane`, `slot` and `typeSlot`. An un-ended
+handle leaves the bar open and keeps both slots held.
 
 ---
 
@@ -256,7 +270,7 @@ JSON; use live emission when you control the agent code directly.
 | `FlowTreeNode`  | Flow Tree, Call Tree  | `nodeId`, `sessionId`, `runId`, `nodeType`, `name`                               |
 | `FlowGraphNode` | Flow Object Graph     | `nodeId`, `sessionId`, `runId`, `nodeType`, `name`                              |
 | `FlowIO`        | Tool I/O              | `nodeId`, `sessionId`, `runId`, `messageId`, `source`, `direction`, `role`, `displayRole`, `toolName`, `content` |
-| `NodeRun`       | Node Runs (timeline)  | `name`, `nodeType`; `nodeId`/`parentNodeId` for nesting (plus `sessionId`/`runId`/`parentName`) |
+| `NodeRun`       | Node Runs (timeline)  | `name`, `nodeType`; `nodeId`/`parentNodeId` for nesting (plus `sessionId`/`runId`/`parentName`/`input`) |
 | `AgentRun`      | Agent Runs (timeline) | `name` (plus `nodeId`/`sessionId`/`runId`/`parentName` for correlation); older SDK versions |
 
 All other fields have defaults. Every event type is `Sendable` + `Codable`, so

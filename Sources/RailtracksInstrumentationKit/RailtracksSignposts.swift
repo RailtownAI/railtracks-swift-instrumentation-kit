@@ -277,10 +277,16 @@ public enum RailtracksSignposts {
             nodeType: event.nodeType.rawValue,
             name: event.name
         )
-        log.trace("begin NodeRun name=\(event.name) type=\(event.nodeType.rawValue) lane=\(assignment.lane) slot=\(assignment.slot)")
+        let input = sanitizeNodeRunInput(event.input)
+        log.trace("begin NodeRun name=\(event.name) type=\(event.nodeType.rawValue) lane=\(assignment.lane) slot=\(assignment.slot) typeSlot=\(assignment.typeSlot)")
         let id = signposter.makeSignpostID()
         // Seed error=0 at begin for the same reason as AgentRun: an unset
         // unsigned column renders as UInt64.max while the interval is open.
+        // Every value is an interpolated argument: Instruments binds pattern
+        // variables only to arguments, never to literal text. `name=` stays
+        // last, and the input cap keeps the message short enough that
+        // os_signpost does not truncate it (a truncated message loses
+        // `name=`, the pattern stops matching, and the bar disappears).
         let state = signposter.beginInterval(
             "NodeRun",
             id: id,
@@ -292,6 +298,8 @@ public enum RailtracksSignposts {
             runId=\(event.runId, privacy: .public) \
             nodeType=\(event.nodeType.rawValue, privacy: .public) \
             slot=\(assignment.slot, privacy: .public) \
+            typeSlot=\(assignment.typeSlot, privacy: .public) \
+            input=\(input, privacy: .public) \
             parentName=\(event.parentName, privacy: .public) \
             name=\(assignment.lane, privacy: .public)
             """
@@ -299,12 +307,14 @@ public enum RailtracksSignposts {
         return NodeRunHandle(
             id: id, state: state, nodeId: event.nodeId,
             laneKey: assignment.key, token: assignment.token,
-            lane: assignment.lane, slot: assignment.slot
+            typeBucket: assignment.typeBucket,
+            lane: assignment.lane, slot: assignment.slot,
+            typeSlot: assignment.typeSlot
         )
     }
 
     /// Close an interval previously opened with `begin(_:)` and release its
-    /// slot. `error: true` flips the bar to red in the Node Runs lane.
+    /// slot and type slot. `error: true` flips the bar to red in the Node Runs lane.
     public static func end(_ handle: NodeRunHandle, error: Bool = false) {
         log.trace("end NodeRun lane=\(handle.lane) error=\(error)")
         signposter.endInterval(
@@ -317,8 +327,43 @@ public enum RailtracksSignposts {
         )
         nodeLaneIndexer.end(
             nodeId: handle.nodeId, laneKey: handle.laneKey,
-            slot: handle.slot, token: handle.token
+            slot: handle.slot, typeBucket: handle.typeBucket,
+            typeSlot: handle.typeSlot, token: handle.token
         )
+    }
+
+    // MARK: - NodeRun input
+
+    /// The most UTF-8 bytes of `NodeRun.input` a begin message carries,
+    /// "…" included. Measured with 36-char ids, a 60-char name and
+    /// parentName, and a nested lane key: an Instruments (xctrace
+    /// os_signpost) recording kept the begin message intact up to a
+    /// 32384-byte input, but the unified log (`log stream --signpost`) cuts
+    /// the message at about 1 KB, losing `name=` from a 672-byte input on
+    /// (640 survived). 512 stays below both with a 128-byte margin for
+    /// longer names and deeper lane keys.
+    static let nodeRunInputByteCap = 512
+
+    /// Collapses every whitespace run (spaces, tabs, newlines) to one
+    /// space, trims, and caps the result at `cap` UTF-8 bytes. A cut lands
+    /// on a character boundary and appends "…", counted inside the cap.
+    static func sanitizeNodeRunInput(_ input: String, cap: Int = nodeRunInputByteCap) -> String {
+        let collapsed = input.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard collapsed.utf8.count > cap else { return collapsed }
+        let ellipsis = "…"
+        let budget = cap - ellipsis.utf8.count
+        guard budget >= 0 else { return "" }
+        var bytes = 0
+        var kept = ""
+        for character in collapsed {
+            let size = character.utf8.count
+            if bytes + size > budget { break }
+            bytes += size
+            kept.append(character)
+        }
+        // Do not leave a dangling space before the ellipsis.
+        if kept.last == " " { kept.removeLast() }
+        return kept + ellipsis
     }
 
     // MARK: - Internal
