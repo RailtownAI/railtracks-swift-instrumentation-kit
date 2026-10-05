@@ -278,15 +278,17 @@ public enum RailtracksSignposts {
             name: event.name
         )
         let input = sanitizeNodeRunInput(event.input)
-        log.trace("begin NodeRun name=\(event.name) type=\(event.nodeType.rawValue) lane=\(assignment.lane) slot=\(assignment.slot) typeSlot=\(assignment.typeSlot)")
+        let instructions = sanitizeNodeRunInput(event.instructions)
+        log.trace("begin NodeRun name=\(event.name) type=\(event.nodeType.rawValue) lane=\(assignment.lane) slot=\(assignment.slot) typeSlot=\(assignment.typeSlot) instructions=\(!instructions.isEmpty)")
         let id = signposter.makeSignpostID()
         // Seed error=0 at begin for the same reason as AgentRun: an unset
         // unsigned column renders as UInt64.max while the interval is open.
         // Every value is an interpolated argument: Instruments binds pattern
-        // variables only to arguments, never to literal text. `name=` stays
-        // last, and the input cap keeps the message short enough that
-        // os_signpost does not truncate it (a truncated message loses
-        // `name=`, the pattern stops matching, and the bar disappears).
+        // variables only to arguments, never to literal text. The longest
+        // free text, `input`, goes last: an Instruments recording keeps the
+        // whole message, but the unified log clips it at about 1 KB, and a
+        // clip there now costs only the tail of `input`, never `name=` or
+        // any field before it.
         let state = signposter.beginInterval(
             "NodeRun",
             id: id,
@@ -299,13 +301,30 @@ public enum RailtracksSignposts {
             nodeType=\(event.nodeType.rawValue, privacy: .public) \
             slot=\(assignment.slot, privacy: .public) \
             typeSlot=\(assignment.typeSlot, privacy: .public) \
-            input=\(input, privacy: .public) \
             parentName=\(event.parentName, privacy: .public) \
-            name=\(assignment.lane, privacy: .public)
+            name=\(assignment.lane, privacy: .public) \
+            input=\(input, privacy: .public)
             """
         )
+        // A second interval on its own id carries the agent's instructions,
+        // so Instruments can show them in full next to the call. Same
+        // ordering rule: the free text goes last.
+        var instructionsState: OSSignpostIntervalState?
+        if opensInstructionsInterval(sanitizedInstructions: instructions) {
+            instructionsState = signposter.beginInterval(
+                "NodeInstructions",
+                id: signposter.makeSignpostID(),
+                """
+                nodeId=\(event.nodeId, privacy: .public) \
+                typeSlot=\(assignment.typeSlot, privacy: .public) \
+                name=\(assignment.lane, privacy: .public) \
+                instructions=\(instructions, privacy: .public)
+                """
+            )
+        }
         return NodeRunHandle(
-            id: id, state: state, nodeId: event.nodeId,
+            id: id, state: state, instructionsState: instructionsState,
+            nodeId: event.nodeId,
             laneKey: assignment.key, token: assignment.token,
             typeBucket: assignment.typeBucket,
             lane: assignment.lane, slot: assignment.slot,
@@ -315,8 +334,16 @@ public enum RailtracksSignposts {
 
     /// Close an interval previously opened with `begin(_:)` and release its
     /// slot and type slot. `error: true` flips the bar to red in the Node Runs lane.
+    /// Closes the call's `NodeInstructions` interval first, when it has one.
     public static func end(_ handle: NodeRunHandle, error: Bool = false) {
         log.trace("end NodeRun lane=\(handle.lane) error=\(error)")
+        if let instructionsState = handle.instructionsState {
+            signposter.endInterval(
+                "NodeInstructions",
+                instructionsState,
+                "name=\(handle.lane, privacy: .public)"
+            )
+        }
         signposter.endInterval(
             "NodeRun",
             handle.state,
@@ -332,17 +359,25 @@ public enum RailtracksSignposts {
         )
     }
 
-    // MARK: - NodeRun input
+    // MARK: - NodeRun input and instructions
 
-    /// The most UTF-8 bytes of `NodeRun.input` a begin message carries,
-    /// "…" included. Measured with 36-char ids, a 60-char name and
-    /// parentName, and a nested lane key: an Instruments (xctrace
-    /// os_signpost) recording kept the begin message intact up to a
-    /// 32384-byte input, but the unified log (`log stream --signpost`) cuts
-    /// the message at about 1 KB, losing `name=` from a 672-byte input on
-    /// (640 survived). 512 stays below both with a 128-byte margin for
-    /// longer names and deeper lane keys.
-    static let nodeRunInputByteCap = 512
+    /// The most UTF-8 bytes of `NodeRun.input` (and, separately, of
+    /// `NodeRun.instructions`) a begin message carries, "…" included.
+    /// Measured with 36-char ids, a 60-char name and parentName, and a
+    /// nested lane key: an Instruments (xctrace os_signpost) recording kept
+    /// the begin message intact up to a 32384-byte input, while the unified
+    /// log (`log stream --signpost`) cuts the message at about 1 KB. With
+    /// the free text last in the message, that cut only clips the tail of
+    /// `input` / `instructions`; every earlier field, `name=` included,
+    /// survives. 4096 carries a full prompt or instruction block into
+    /// Instruments while staying far below its limit.
+    static let nodeRunInputByteCap = 4096
+
+    /// Whether `begin` opens a `NodeInstructions` interval: only for
+    /// instructions that are non-empty after sanitizing.
+    static func opensInstructionsInterval(sanitizedInstructions: String) -> Bool {
+        !sanitizedInstructions.isEmpty
+    }
 
     /// Collapses every whitespace run (spaces, tabs, newlines) to one
     /// space, trims, and caps the result at `cap` UTF-8 bytes. A cut lands

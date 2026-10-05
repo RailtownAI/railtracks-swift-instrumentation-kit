@@ -203,12 +203,32 @@ as strings, the lanes read as the call tree.
   `typeSlot` is the lowest slot not held by another *live* call of the same
   type, across all runs and lanes. Parallel calls of one type get separate
   sub-rows; `end` releases the type slot too.
-- **Input.** `input` is a short summary of what the node received — the prompt
-  for an agent, the arguments for a tool — shown when you hover the bar. It is
-  emitted as a **public** signpost string, so it is readable by anyone with
-  the unified log; don't pass secrets. Whitespace runs collapse to one space,
-  and it is capped at 512 UTF-8 bytes (cut on a character boundary, ending in
-  "…"), which keeps the begin message under the unified log's ~1 KB limit.
+- **Input.** `input` is what the node received — the prompt for an agent, the
+  arguments for a tool — shown when you hover the bar. It is emitted as a
+  **public** signpost string, so it is readable by anyone with the unified
+  log; don't pass secrets. Whitespace runs collapse to one space, and it is
+  capped at 4096 UTF-8 bytes (4 KB, cut on a character boundary, ending in
+  "…").
+- **Instructions.** `instructions` holds an agent's system instructions,
+  sanitized, capped and public exactly like `input`. When it is non-empty,
+  `begin` also opens a **NodeInstructions** interval next to the NodeRun, so
+  Instruments can show the full instructions the way Apple's Foundation Models
+  instrument shows prompts. `end` closes it first, then the NodeRun. The
+  handle's `hasInstructionsInterval` tells you whether one was opened.
+- **Field order.** The free text goes last, so a cut only ever costs its tail:
+
+  ```text
+  NodeRun begin:          error=0 nodeId=… parentNodeId=… sessionId=… runId=… nodeType=… slot=… typeSlot=… parentName=… name=<lane> input=<text>
+  NodeRun end:            error=<0|1> name=<lane>
+  NodeInstructions begin: nodeId=… typeSlot=… name=<lane> instructions=<text>
+  NodeInstructions end:   name=<lane>
+  ```
+
+  An Instruments recording keeps a signpost message intact up to about 32 KB,
+  so a 4 KB `input` or `instructions` arrives whole. The unified log
+  (`log stream`, Console) clips a message at about 1 KB; there the trailing
+  text is cut short and ends in `<…>`, while `name=` and every field before it
+  survive.
 
 ```swift
 let agent = RailtracksSignposts.begin(NodeRun(
@@ -218,7 +238,8 @@ let agent = RailtracksSignposts.begin(NodeRun(
     parentNodeId: "",         // "" for a root call
     sessionId: session,
     runId: run,
-    input: prompt             // shown on hover; public in the unified log
+    input: prompt,            // shown on hover; public in the unified log
+    instructions: systemPrompt // opens a NodeInstructions interval when non-empty
 ))
 defer { RailtracksSignposts.end(agent, error: didFail) }
 
@@ -270,7 +291,7 @@ JSON; use live emission when you control the agent code directly.
 | `FlowTreeNode`  | Flow Tree, Call Tree  | `nodeId`, `sessionId`, `runId`, `nodeType`, `name`                               |
 | `FlowGraphNode` | Flow Object Graph     | `nodeId`, `sessionId`, `runId`, `nodeType`, `name`                              |
 | `FlowIO`        | Tool I/O              | `nodeId`, `sessionId`, `runId`, `messageId`, `source`, `direction`, `role`, `displayRole`, `toolName`, `content` |
-| `NodeRun`       | Node Runs (timeline)  | `name`, `nodeType`; `nodeId`/`parentNodeId` for nesting (plus `sessionId`/`runId`/`parentName`/`input`) |
+| `NodeRun`       | Node Runs (timeline)  | `name`, `nodeType`; `nodeId`/`parentNodeId` for nesting (plus `sessionId`/`runId`/`parentName`/`input`/`instructions`) |
 | `AgentRun`      | Agent Runs (timeline) | `name` (plus `nodeId`/`sessionId`/`runId`/`parentName` for correlation); older SDK versions |
 
 All other fields have defaults. Every event type is `Sendable` + `Codable`, so

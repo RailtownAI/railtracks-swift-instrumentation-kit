@@ -201,6 +201,11 @@ struct NodeRunInputSanitizerTests {
 
     private let cap = RailtracksSignposts.nodeRunInputByteCap
 
+    @Test("the cap is 4096 UTF-8 bytes")
+    func capIs4096() {
+        #expect(cap == 4096)
+    }
+
     @Test("newlines, tabs and space runs collapse to one space, and the ends are trimmed")
     func collapsesAndTrims() {
         let raw = "  \n\tPlan a trip\n\nto  Lisbon\t\tin May \r\n "
@@ -240,6 +245,66 @@ struct NodeRunInputSanitizerTests {
         #expect(kept.allSatisfy { unit.contains($0) })
         // The cut wasted fewer bytes than one more source unit would take.
         #expect(cap - result.utf8.count < unit.utf8.count)
+    }
+
+    @Test("a 4 KB prompt with multibyte text past the cap is cut to at most 4096 bytes")
+    func multibyteAtFourKilobytes() {
+        // 2-byte accents and 4-byte emoji, separated by newlines that
+        // collapse to single spaces.
+        let line = "Olá café ação 😀 naïve 🚆\n"
+        let raw = String(repeating: line, count: 200)
+        #expect(raw.utf8.count > cap)
+        let result = RailtracksSignposts.sanitizeNodeRunInput(raw)
+        #expect(result.utf8.count <= cap)
+        // At most 3 bytes of an emoji that did not fit plus 1 dropped space.
+        #expect(result.utf8.count >= cap - 4)
+        #expect(result.hasSuffix("…"))
+        #expect(!result.contains("\n"))
+        #expect(!result.dropLast().hasSuffix(" "))
+        let collapsed = raw.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        #expect(collapsed.hasPrefix(String(result.dropLast())))
+    }
+
+    @Test("multibyte text that fits in 4096 bytes passes through unchanged")
+    func multibyteUnderCapUnchanged() {
+        let unit = "Olá 😀 "
+        var text = String(repeating: unit, count: cap / unit.utf8.count)
+        text = String(text.dropLast())  // no trailing space
+        #expect(text.utf8.count <= cap)
+        #expect(RailtracksSignposts.sanitizeNodeRunInput(text) == text)
+    }
+}
+
+@Suite("NodeInstructions interval")
+struct NodeInstructionsIntervalTests {
+
+    @Test("the decision helper opens an interval only for non-empty text")
+    func helperDecision() {
+        #expect(!RailtracksSignposts.opensInstructionsInterval(sanitizedInstructions: ""))
+        #expect(RailtracksSignposts.opensInstructionsInterval(sanitizedInstructions: "Be concise"))
+    }
+
+    @Test("begin opens a NodeInstructions interval only when the sanitized instructions are non-empty",
+          arguments: [("", false), ("  \n\t ", false), ("Be concise.", true),
+                      (String(repeating: "Réponds en français 😀. ", count: 300), true)])
+    func beginOpensInterval(instructions: String, expected: Bool) {
+        let runId = UUID().uuidString
+        let handle = RailtracksSignposts.begin(NodeRun(
+            name: "Planner", nodeType: .agent, nodeId: "\(runId)-ag",
+            runId: runId, input: "Plan a trip", instructions: instructions
+        ))
+        defer { RailtracksSignposts.end(handle) }
+        #expect(handle.hasInstructionsInterval == expected)
+    }
+
+    @Test("instructions default to empty and open no interval")
+    func defaultIsEmpty() {
+        let runId = UUID().uuidString
+        let run = NodeRun(name: "add", nodeType: .tool, nodeId: "\(runId)-t", runId: runId)
+        #expect(run.instructions == "")
+        let handle = RailtracksSignposts.begin(run)
+        RailtracksSignposts.end(handle, error: true)
+        #expect(!handle.hasInstructionsInterval)
     }
 }
 

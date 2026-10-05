@@ -30,13 +30,19 @@ public struct NodeRun: Sendable, Codable, Equatable {
     public var sessionId: String
     public var runId: String
     public var parentName: String
-    /// A short summary of what the node received: the prompt for an agent,
+    /// What the node received: the prompt for an agent,
     /// the arguments for a tool. Published as a public signpost string, so
     /// it is readable in the unified log (do not pass secrets). Whitespace
     /// runs collapse to one space and the text is capped at
     /// `RailtracksSignposts.nodeRunInputByteCap` UTF-8 bytes (with a
     /// trailing "…" when cut) before it is emitted.
     public var input: String
+    /// An agent's system instructions, or `""` for none. Sanitized and
+    /// capped exactly like `input`, and also public in the unified log. When
+    /// non-empty after sanitizing, `begin` opens a second interval,
+    /// `NodeInstructions`, alongside the NodeRun so Instruments can show
+    /// the full text; `end` closes both.
+    public var instructions: String
 
     public init(
         name: String,
@@ -46,7 +52,8 @@ public struct NodeRun: Sendable, Codable, Equatable {
         sessionId: String = "",
         runId: String = "",
         parentName: String = "",
-        input: String = ""
+        input: String = "",
+        instructions: String = ""
     ) {
         self.name = name
         self.nodeType = nodeType
@@ -56,6 +63,7 @@ public struct NodeRun: Sendable, Codable, Equatable {
         self.runId = runId
         self.parentName = parentName
         self.input = input
+        self.instructions = instructions
     }
 }
 
@@ -66,6 +74,9 @@ public struct NodeRun: Sendable, Codable, Equatable {
 public struct NodeRunHandle: Sendable {
     let id: OSSignpostID
     let state: OSSignpostIntervalState
+    /// The `NodeInstructions` interval opened next to the NodeRun, or nil
+    /// when the call had no (non-empty) instructions.
+    let instructionsState: OSSignpostIntervalState?
     let nodeId: String
     let laneKey: String
     /// Identifies this call in the indexer's live map, so ending it never
@@ -84,4 +95,8 @@ public struct NodeRunHandle: Sendable {
     /// by another live call of the same type bucket, across all runs and
     /// lanes. 0 unless calls of that type overlap in time.
     public let typeSlot: Int
+    /// Whether `begin` opened a `NodeInstructions` interval for this call
+    /// (true when the sanitized `instructions` were non-empty). `end`
+    /// closes it before the NodeRun interval.
+    public var hasInstructionsInterval: Bool { instructionsState != nil }
 }
