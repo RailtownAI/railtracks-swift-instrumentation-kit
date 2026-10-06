@@ -179,30 +179,27 @@ call use `NodeRun` below.
 
 `NodeRun` is one interval per node call — agent, tool, or function — nested
 under its caller. Like `AgentRun`, `begin` returns a handle you must pass to
-`end`; Instruments draws the bar on the **Node Runs** lane (red on error,
-otherwise purple for agents, blue for tools, green for anything else).
+`end`; Instruments draws the bar in the **Node Runs (containment)** graph (red
+on error, otherwise purple for agents, blue for tools, green for anything
+else) and in the per-type **Agents** / **Tools** lanes.
 
-Each call lands in a lane named `"<key> Name"`, where the key nests under the
-caller's lane: `"00-000 MathWorkflow"`, `"00-000.000 Math Agent"`,
-`"00-000.000.000 add"`, `"00-000.000.001 multiply"`. A root key is
-`<run>-<root>` (the run's first-seen ordinal, then the root lane's order within
-the run); a child appends `.<child>`, the lane's order under its caller. Sorted
-as strings, the lanes read as the call tree.
+The bar is labeled with the plain node `name`. Lanes are no longer encoded in
+the name: the kit sends where the bar goes as separate fields.
 
-- **Parent lookup.** A call nests under the lane of the *live* call whose
-  `nodeId` equals its `parentNodeId`. Begin the caller before its children.
-  An empty, unknown, or already-ended `parentNodeId` gets a root lane.
-- **Shared lanes.** Every call of the same node (`nodeType` + `name`) under the
-  same caller lane shares one lane, so repeated tool calls line up. The same
-  node under a different caller gets its own lane there.
-- **Slots.** Calls that overlap in one lane get distinct slots (the lowest
-  free one, from 0), shown as sub-rows. `end` releases the slot.
-- **Type slots.** Alongside the call tree, every call also lands in one of
-  three fixed lanes: **Agents** (`.agent`), **Tools** (`.tool`), and **Nodes**
-  (everything else, including `"Function"`). Those lanes are global, so the
-  `typeSlot` is the lowest slot not held by another *live* call of the same
-  type, across all runs and lanes. Parallel calls of one type get separate
-  sub-rows; `end` releases the type slot too.
+- **`run`.** The run's ordinal in first-seen order of `runId`, as two digits
+  (`"00"`, `"01"`, …). The containment graph makes one lane per run,
+  "Run 00", "Run 01", ….
+- **`depth`.** 0 for a root call, otherwise the live caller's depth + 1. The
+  containment graph nests each bar under its caller by it. A call finds its
+  caller as the *live* call whose `nodeId` equals its `parentNodeId`, so begin
+  the caller before its children. An empty, unknown, or already-ended
+  `parentNodeId` gives depth 0.
+- **`typeSlot`.** Every call also lands in one of three fixed type buckets:
+  **Agents** (`.agent`), **Tools** (`.tool`), and **Nodes** (everything else,
+  including `"Function"`). Those lanes are global, so the `typeSlot` is the
+  lowest slot not held by another *live* call of the same type, across all
+  runs. Parallel calls of one type get separate sub-rows; `end` releases the
+  type slot.
 - **Input.** `input` is what the node received — the prompt for an agent, the
   arguments for a tool — shown when you hover the bar. It is emitted as a
   **public** signpost string, so it is readable by anyone with the unified
@@ -218,10 +215,10 @@ as strings, the lanes read as the call tree.
 - **Field order.** The free text goes last, so a cut only ever costs its tail:
 
   ```text
-  NodeRun begin:          error=0 nodeId=… parentNodeId=… sessionId=… runId=… nodeType=… slot=… typeSlot=… parentName=… name=<lane> input=<text>
-  NodeRun end:            error=<0|1> name=<lane>
-  NodeInstructions begin: nodeId=… typeSlot=… name=<lane> instructions=<text>
-  NodeInstructions end:   name=<lane>
+  NodeRun begin:          error=0 nodeId=… parentNodeId=… sessionId=… runId=… nodeType=… run=<NN> depth=<n> typeSlot=… parentName=… name=<name> input=<text>
+  NodeRun end:            error=<0|1> name=<name>
+  NodeInstructions begin: nodeId=… typeSlot=… name=<name> instructions=<text>
+  NodeInstructions end:   name=<name>
   ```
 
   An Instruments recording keeps a signpost message intact up to about 32 KB,
@@ -253,8 +250,8 @@ let tool = RailtracksSignposts.begin(NodeRun(
 RailtracksSignposts.end(tool)
 ```
 
-The handle exposes the assigned `lane`, `slot` and `typeSlot`. An un-ended
-handle leaves the bar open and keeps both slots held.
+The handle exposes the assigned `run`, `depth` and `typeSlot`. An un-ended
+handle leaves the bar open and keeps its type slot held.
 
 ---
 

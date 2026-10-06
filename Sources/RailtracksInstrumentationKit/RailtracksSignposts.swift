@@ -260,26 +260,25 @@ public enum RailtracksSignposts {
     /// Start an interval signpost for one node call (agent, tool, function).
     /// Returns a handle the caller MUST pass to `end(_:error:)` when the
     /// call finishes — dropping the handle leaves the interval open and
-    /// keeps its slot held, so later overlapping calls in the lane shift to
-    /// a higher sub-row.
+    /// keeps its type slot held, so later overlapping calls of the same type
+    /// shift to a higher sub-row.
     ///
-    /// Begin the caller's interval before its children's: a child nests
-    /// under the lane of the live call whose `nodeId` equals its
-    /// `parentNodeId`, and falls back to a root lane when there is none.
+    /// Begin the caller's interval before its children's: a child's depth
+    /// is one more than the live call whose `nodeId` equals its
+    /// `parentNodeId`, and 0 when there is none.
     public static func begin(_ event: NodeRun) -> NodeRunHandle {
-        // Lane "<key> <name>", where the key nests under the caller's lane
-        // ("00-000.001 add") so the Node Runs lane, which orders swimlanes
-        // lexically, reads as a call tree. See NodeLaneIndexer for the rules.
-        let assignment = nodeLaneIndexer.begin(
+        // run, depth and typeSlot place the bar: the containment graph
+        // makes one lane per run and nests by depth, and the per-type lanes
+        // split overlapping calls by typeSlot. See NodeRunIndexer.
+        let assignment = nodeRunIndexer.begin(
             nodeId: event.nodeId,
             parentNodeId: event.parentNodeId,
             runId: event.runId,
-            nodeType: event.nodeType.rawValue,
-            name: event.name
+            nodeType: event.nodeType.rawValue
         )
         let input = sanitizeNodeRunInput(event.input)
         let instructions = sanitizeNodeRunInput(event.instructions)
-        log.trace("begin NodeRun name=\(event.name) type=\(event.nodeType.rawValue) lane=\(assignment.lane) slot=\(assignment.slot) typeSlot=\(assignment.typeSlot) instructions=\(!instructions.isEmpty)")
+        log.trace("begin NodeRun name=\(event.name) type=\(event.nodeType.rawValue) run=\(assignment.run) depth=\(assignment.depth) typeSlot=\(assignment.typeSlot) instructions=\(!instructions.isEmpty)")
         let id = signposter.makeSignpostID()
         // Seed error=0 at begin for the same reason as AgentRun: an unset
         // unsigned column renders as UInt64.max while the interval is open.
@@ -299,10 +298,11 @@ public enum RailtracksSignposts {
             sessionId=\(event.sessionId, privacy: .public) \
             runId=\(event.runId, privacy: .public) \
             nodeType=\(event.nodeType.rawValue, privacy: .public) \
-            slot=\(assignment.slot, privacy: .public) \
+            run=\(assignment.run, privacy: .public) \
+            depth=\(assignment.depth, privacy: .public) \
             typeSlot=\(assignment.typeSlot, privacy: .public) \
             parentName=\(event.parentName, privacy: .public) \
-            name=\(assignment.lane, privacy: .public) \
+            name=\(event.name, privacy: .public) \
             input=\(input, privacy: .public)
             """
         )
@@ -317,31 +317,30 @@ public enum RailtracksSignposts {
                 """
                 nodeId=\(event.nodeId, privacy: .public) \
                 typeSlot=\(assignment.typeSlot, privacy: .public) \
-                name=\(assignment.lane, privacy: .public) \
+                name=\(event.name, privacy: .public) \
                 instructions=\(instructions, privacy: .public)
                 """
             )
         }
         return NodeRunHandle(
             id: id, state: state, instructionsState: instructionsState,
-            nodeId: event.nodeId,
-            laneKey: assignment.key, token: assignment.token,
+            name: event.name, nodeId: event.nodeId, token: assignment.token,
             typeBucket: assignment.typeBucket,
-            lane: assignment.lane, slot: assignment.slot,
+            run: assignment.run, depth: assignment.depth,
             typeSlot: assignment.typeSlot
         )
     }
 
     /// Close an interval previously opened with `begin(_:)` and release its
-    /// slot and type slot. `error: true` flips the bar to red in the Node Runs lane.
+    /// type slot. `error: true` flips the bar to red in the Node Runs graphs.
     /// Closes the call's `NodeInstructions` interval first, when it has one.
     public static func end(_ handle: NodeRunHandle, error: Bool = false) {
-        log.trace("end NodeRun lane=\(handle.lane) error=\(error)")
+        log.trace("end NodeRun name=\(handle.name) run=\(handle.run) depth=\(handle.depth) error=\(error)")
         if let instructionsState = handle.instructionsState {
             signposter.endInterval(
                 "NodeInstructions",
                 instructionsState,
-                "name=\(handle.lane, privacy: .public)"
+                "name=\(handle.name, privacy: .public)"
             )
         }
         signposter.endInterval(
@@ -349,12 +348,11 @@ public enum RailtracksSignposts {
             handle.state,
             """
             error=\(error ? 1 : 0, privacy: .public) \
-            name=\(handle.lane, privacy: .public)
+            name=\(handle.name, privacy: .public)
             """
         )
-        nodeLaneIndexer.end(
-            nodeId: handle.nodeId, laneKey: handle.laneKey,
-            slot: handle.slot, typeBucket: handle.typeBucket,
+        nodeRunIndexer.end(
+            nodeId: handle.nodeId, typeBucket: handle.typeBucket,
             typeSlot: handle.typeSlot, token: handle.token
         )
     }
@@ -363,10 +361,11 @@ public enum RailtracksSignposts {
 
     /// The most UTF-8 bytes of `NodeRun.input` (and, separately, of
     /// `NodeRun.instructions`) a begin message carries, "…" included.
-    /// Measured with 36-char ids, a 60-char name and parentName, and a
-    /// nested lane key: an Instruments (xctrace os_signpost) recording kept
-    /// the begin message intact up to a 32384-byte input, while the unified
-    /// log (`log stream --signpost`) cuts the message at about 1 KB. With
+    /// Measured with 36-char ids, and a 60-char name (then still prefixed
+    /// with a lane key) and parentName: an Instruments (xctrace
+    /// os_signpost) recording kept the begin message intact up to a
+    /// 32384-byte input, while the unified log (`log stream --signpost`)
+    /// cuts the message at about 1 KB. With
     /// the free text last in the message, that cut only clips the tail of
     /// `input` / `instructions`; every earlier field, `name=` included,
     /// survives. 4096 carries a full prompt or instruction block into
@@ -408,10 +407,10 @@ public enum RailtracksSignposts {
     /// order is begin order.
     private static let agentRunIndexer = AgentRunIndexer()
 
-    /// Process-wide lane state behind `begin(_ event: NodeRun)`: run
-    /// ordinals, lane keys and counters (kept for the process), plus the
-    /// live calls and the slots they hold (released at `end`).
-    private static let nodeLaneIndexer = NodeLaneIndexer()
+    /// Process-wide state behind `begin(_ event: NodeRun)`: run ordinals
+    /// (kept for the process), plus the live calls with their depths and
+    /// the type slots they hold (released at `end`).
+    private static let nodeRunIndexer = NodeRunIndexer()
 
     private static func sanitize(_ s: String) -> String {
         s.replacingOccurrences(of: "\\", with: "\\\\")
