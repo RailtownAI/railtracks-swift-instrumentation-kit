@@ -199,6 +199,9 @@ public enum RailtracksSignposts {
     }
 
     // MARK: - AgentRun (interval)
+    //
+    // One interval per agent. Kept for older SDK versions; SDKs that emit
+    // one interval per node call use the NodeRun overloads below.
 
     /// Start an interval signpost for one agent's run. Returns a handle the
     /// caller MUST pass to `end(_:error:)` when the agent finishes —
@@ -252,12 +255,162 @@ public enum RailtracksSignposts {
         )
     }
 
+    // MARK: - NodeRun (interval)
+
+    /// Start an interval signpost for one node call (agent, tool, function).
+    /// Returns a handle the caller MUST pass to `end(_:error:)` when the
+    /// call finishes — dropping the handle leaves the interval open and
+    /// keeps its type slot held, so later overlapping calls of the same type
+    /// shift to a higher sub-row.
+    ///
+    /// Begin the caller's interval before its children's: a child's depth
+    /// is one more than the live call whose `nodeId` equals its
+    /// `parentNodeId`, and 0 when there is none.
+    public static func begin(_ event: NodeRun) -> NodeRunHandle {
+        // run, depth and typeSlot place the bar: the containment graph
+        // makes one lane per run and nests by depth, and the per-type lanes
+        // split overlapping calls by typeSlot. See NodeRunIndexer.
+        let assignment = nodeRunIndexer.begin(
+            nodeId: event.nodeId,
+            parentNodeId: event.parentNodeId,
+            runId: event.runId,
+            nodeType: event.nodeType.rawValue
+        )
+        let input = sanitizeNodeRunInput(event.input)
+        let instructions = sanitizeNodeRunInput(event.instructions)
+        log.trace("begin NodeRun name=\(event.name) type=\(event.nodeType.rawValue) run=\(assignment.run) depth=\(assignment.depth) typeSlot=\(assignment.typeSlot) instructions=\(!instructions.isEmpty)")
+        let id = signposter.makeSignpostID()
+        // Seed error=0 at begin for the same reason as AgentRun: an unset
+        // unsigned column renders as UInt64.max while the interval is open.
+        // Every value is an interpolated argument: Instruments binds pattern
+        // variables only to arguments, never to literal text. The longest
+        // free text, `input`, goes last: an Instruments recording keeps the
+        // whole message, but the unified log clips it at about 1 KB, and a
+        // clip there now costs only the tail of `input`, never `name=` or
+        // any field before it.
+        let state = signposter.beginInterval(
+            "NodeRun",
+            id: id,
+            """
+            error=\(0, privacy: .public) \
+            nodeId=\(event.nodeId, privacy: .public) \
+            parentNodeId=\(event.parentNodeId, privacy: .public) \
+            sessionId=\(event.sessionId, privacy: .public) \
+            runId=\(event.runId, privacy: .public) \
+            nodeType=\(event.nodeType.rawValue, privacy: .public) \
+            run=\(assignment.run, privacy: .public) \
+            depth=\(assignment.depth, privacy: .public) \
+            typeSlot=\(assignment.typeSlot, privacy: .public) \
+            parentName=\(event.parentName, privacy: .public) \
+            name=\(event.name, privacy: .public) \
+            input=\(input, privacy: .public)
+            """
+        )
+        // A second interval on its own id carries the agent's instructions,
+        // so Instruments can show them in full next to the call. Same
+        // ordering rule: the free text goes last.
+        var instructionsState: OSSignpostIntervalState?
+        if opensInstructionsInterval(sanitizedInstructions: instructions) {
+            instructionsState = signposter.beginInterval(
+                "NodeInstructions",
+                id: signposter.makeSignpostID(),
+                """
+                nodeId=\(event.nodeId, privacy: .public) \
+                typeSlot=\(assignment.typeSlot, privacy: .public) \
+                name=\(event.name, privacy: .public) \
+                instructions=\(instructions, privacy: .public)
+                """
+            )
+        }
+        return NodeRunHandle(
+            id: id, state: state, instructionsState: instructionsState,
+            name: event.name, nodeId: event.nodeId, token: assignment.token,
+            typeBucket: assignment.typeBucket,
+            run: assignment.run, depth: assignment.depth,
+            typeSlot: assignment.typeSlot
+        )
+    }
+
+    /// Close an interval previously opened with `begin(_:)` and release its
+    /// type slot. `error: true` flips the bar to red in the Node Runs graphs.
+    /// Closes the call's `NodeInstructions` interval first, when it has one.
+    public static func end(_ handle: NodeRunHandle, error: Bool = false) {
+        log.trace("end NodeRun name=\(handle.name) run=\(handle.run) depth=\(handle.depth) error=\(error)")
+        if let instructionsState = handle.instructionsState {
+            signposter.endInterval(
+                "NodeInstructions",
+                instructionsState,
+                "name=\(handle.name, privacy: .public)"
+            )
+        }
+        signposter.endInterval(
+            "NodeRun",
+            handle.state,
+            """
+            error=\(error ? 1 : 0, privacy: .public) \
+            name=\(handle.name, privacy: .public)
+            """
+        )
+        nodeRunIndexer.end(
+            nodeId: handle.nodeId, typeBucket: handle.typeBucket,
+            typeSlot: handle.typeSlot, token: handle.token
+        )
+    }
+
+    // MARK: - NodeRun input and instructions
+
+    /// The most UTF-8 bytes of `NodeRun.input` (and, separately, of
+    /// `NodeRun.instructions`) a begin message carries, "…" included.
+    /// Measured with 36-char ids, and a 60-char name (then still prefixed
+    /// with a lane key) and parentName: an Instruments (xctrace
+    /// os_signpost) recording kept the begin message intact up to a
+    /// 32384-byte input, while the unified log (`log stream --signpost`)
+    /// cuts the message at about 1 KB. With
+    /// the free text last in the message, that cut only clips the tail of
+    /// `input` / `instructions`; every earlier field, `name=` included,
+    /// survives. 4096 carries a full prompt or instruction block into
+    /// Instruments while staying far below its limit.
+    static let nodeRunInputByteCap = 4096
+
+    /// Whether `begin` opens a `NodeInstructions` interval: only for
+    /// instructions that are non-empty after sanitizing.
+    static func opensInstructionsInterval(sanitizedInstructions: String) -> Bool {
+        !sanitizedInstructions.isEmpty
+    }
+
+    /// Collapses every whitespace run (spaces, tabs, newlines) to one
+    /// space, trims, and caps the result at `cap` UTF-8 bytes. A cut lands
+    /// on a character boundary and appends "…", counted inside the cap.
+    static func sanitizeNodeRunInput(_ input: String, cap: Int = nodeRunInputByteCap) -> String {
+        let collapsed = input.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard collapsed.utf8.count > cap else { return collapsed }
+        let ellipsis = "…"
+        let budget = cap - ellipsis.utf8.count
+        guard budget >= 0 else { return "" }
+        var bytes = 0
+        var kept = ""
+        for character in collapsed {
+            let size = character.utf8.count
+            if bytes + size > budget { break }
+            bytes += size
+            kept.append(character)
+        }
+        // Do not leave a dangling space before the ellipsis.
+        if kept.last == " " { kept.removeLast() }
+        return kept + ellipsis
+    }
+
     // MARK: - Internal
 
     /// Process-wide counters behind `begin(_:)`: a first-seen ordinal per
     /// `runId` and a per-run agent start index. For a live producer, start
     /// order is begin order.
     private static let agentRunIndexer = AgentRunIndexer()
+
+    /// Process-wide state behind `begin(_ event: NodeRun)`: run ordinals
+    /// (kept for the process), plus the live calls with their depths and
+    /// the type slots they hold (released at `end`).
+    private static let nodeRunIndexer = NodeRunIndexer()
 
     private static func sanitize(_ s: String) -> String {
         s.replacingOccurrences(of: "\\", with: "\\\\")

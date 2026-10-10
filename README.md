@@ -172,6 +172,87 @@ defer { RailtracksSignposts.end(handle, error: didFail) }
 Dropping the handle leaves the interval open and the bar runs forever — always
 `end` it (a `defer` is the safest pattern).
 
+`AgentRun` remains for older SDK versions. SDKs that emit one interval per node
+call use `NodeRun` below.
+
+### Interval events (node durations)
+
+`NodeRun` is one interval per node call — agent, tool, or function — nested
+under its caller. Like `AgentRun`, `begin` returns a handle you must pass to
+`end`; Instruments draws the bar in the **Node Runs (containment)** graph (red
+on error, otherwise purple for agents, blue for tools, green for anything
+else) and in the per-type **Agents** / **Tools** lanes.
+
+The bar is labeled with the plain node `name`. Lanes are no longer encoded in
+the name: the kit sends where the bar goes as separate fields.
+
+- **`run`.** The run's ordinal in first-seen order of `runId`, as two digits
+  (`"00"`, `"01"`, …). The containment graph makes one lane per run,
+  "Run 00", "Run 01", ….
+- **`depth`.** 0 for a root call, otherwise the live caller's depth + 1. The
+  containment graph nests each bar under its caller by it. A call finds its
+  caller as the *live* call whose `nodeId` equals its `parentNodeId`, so begin
+  the caller before its children. An empty, unknown, or already-ended
+  `parentNodeId` gives depth 0.
+- **`typeSlot`.** Every call also lands in one of three fixed type buckets:
+  **Agents** (`.agent`), **Tools** (`.tool`), and **Nodes** (everything else,
+  including `"Function"`). Those lanes are global, so the `typeSlot` is the
+  lowest slot not held by another *live* call of the same type, across all
+  runs. Parallel calls of one type get separate sub-rows; `end` releases the
+  type slot.
+- **Input.** `input` is what the node received — the prompt for an agent, the
+  arguments for a tool — shown when you hover the bar. It is emitted as a
+  **public** signpost string, so it is readable by anyone with the unified
+  log; don't pass secrets. Whitespace runs collapse to one space, and it is
+  capped at 4096 UTF-8 bytes (4 KB, cut on a character boundary, ending in
+  "…").
+- **Instructions.** `instructions` holds an agent's system instructions,
+  sanitized, capped and public exactly like `input`. When it is non-empty,
+  `begin` also opens a **NodeInstructions** interval next to the NodeRun, so
+  Instruments can show the full instructions the way Apple's Foundation Models
+  instrument shows prompts. `end` closes it first, then the NodeRun. The
+  handle's `hasInstructionsInterval` tells you whether one was opened.
+- **Field order.** The free text goes last, so a cut only ever costs its tail:
+
+  ```text
+  NodeRun begin:          error=0 nodeId=… parentNodeId=… sessionId=… runId=… nodeType=… run=<NN> depth=<n> typeSlot=… parentName=… name=<name> input=<text>
+  NodeRun end:            error=<0|1> name=<name>
+  NodeInstructions begin: nodeId=… typeSlot=… name=<name> instructions=<text>
+  NodeInstructions end:   name=<name>
+  ```
+
+  An Instruments recording keeps a signpost message intact up to about 32 KB,
+  so a 4 KB `input` or `instructions` arrives whole. The unified log
+  (`log stream`, Console) clips a message at about 1 KB; there the trailing
+  text is cut short and ends in `<…>`, while `name=` and every field before it
+  survive.
+
+```swift
+let agent = RailtracksSignposts.begin(NodeRun(
+    name: "Math Agent",
+    nodeType: .agent,
+    nodeId: agentNode.id,
+    parentNodeId: "",         // "" for a root call
+    sessionId: session,
+    runId: run,
+    input: prompt,            // shown on hover; public in the unified log
+    instructions: systemPrompt // opens a NodeInstructions interval when non-empty
+))
+defer { RailtracksSignposts.end(agent, error: didFail) }
+
+let tool = RailtracksSignposts.begin(NodeRun(
+    name: "add", nodeType: .tool,
+    nodeId: toolNode.id, parentNodeId: agentNode.id,
+    sessionId: session, runId: run, parentName: "Math Agent",
+    input: #"{"a": 2, "b": 3}"#
+))
+// ... run the tool ...
+RailtracksSignposts.end(tool)
+```
+
+The handle exposes the assigned `run`, `depth` and `typeSlot`. An un-ended
+handle leaves the bar open and keeps its type slot held.
+
 ---
 
 ## Usage — turnkey replay from RTSFlowGraph JSON
@@ -207,7 +288,8 @@ JSON; use live emission when you control the agent code directly.
 | `FlowTreeNode`  | Flow Tree, Call Tree  | `nodeId`, `sessionId`, `runId`, `nodeType`, `name`                               |
 | `FlowGraphNode` | Flow Object Graph     | `nodeId`, `sessionId`, `runId`, `nodeType`, `name`                              |
 | `FlowIO`        | Tool I/O              | `nodeId`, `sessionId`, `runId`, `messageId`, `source`, `direction`, `role`, `displayRole`, `toolName`, `content` |
-| `AgentRun`      | Agent Runs (timeline) | `name` (plus `nodeId`/`sessionId`/`runId`/`parentName` for correlation)          |
+| `NodeRun`       | Node Runs (timeline)  | `name`, `nodeType`; `nodeId`/`parentNodeId` for nesting (plus `sessionId`/`runId`/`parentName`/`input`/`instructions`) |
+| `AgentRun`      | Agent Runs (timeline) | `name` (plus `nodeId`/`sessionId`/`runId`/`parentName` for correlation); older SDK versions |
 
 All other fields have defaults. Every event type is `Sendable` + `Codable`, so
 you can build them on background tasks, serialize, queue, or replay.
@@ -228,7 +310,7 @@ public enum NodeType { case agent, tool, custom(String) }
 `.agent` and `.tool` are the types the Instruments schema styles specially
 (`.agent` → purple/sparkles; everything else → blue/wrench). `.custom("…")`
 preserves any other type losslessly — it renders like a Tool but keeps its real
-name in the Type columns. The on-the-wire value is `nodeType.rawValue`
+name in the Type columns (on the Node Runs lane it is colored green). The on-the-wire value is `nodeType.rawValue`
 (`"Agent"` / `"Tool"` / the custom string), so the enum doesn't change the
 signpost format. `FlowGraphNode.parentType` is an optional `NodeType?` — `nil`
 for a root, otherwise it must equal the parent's `nodeType` (see above).
@@ -340,7 +422,8 @@ Then start a recording with the **Railtracks Instrumentation** template.
 | Flow Object Graph   | `FlowGraphNode`              | directed parent→child node graph                      |
 | Tool I/O            | `FlowIO`                     | per-tool input/output messages                        |
 | Call Tree           | `FlowTreeNode`               | backtraces with source-jump to the emit site          |
-| Agent Runs          | `AgentRun`                   | per-agent duration bars on a timeline                 |
+| Node Runs           | `NodeRun`                    | per-node-call duration bars, nested by caller         |
+| Agent Runs          | `AgentRun`                   | per-agent duration bars (older SDK versions)          |
 
 ---
 
@@ -350,7 +433,7 @@ The library emits diagnostic logs via [`apple/swift-log`](https://github.com/app
 following the [Swift library log-level guidance](https://www.swift.org/documentation/server/guides/libraries/log-levels.html):
 
 - **`.trace`** — one line per emitted event (`FlowTreeNode`/`FlowGraphNode`/
-  `FlowIO`, `AgentRun` begin/end) and per benign skip (tool nodes with no
+  `FlowIO`, `NodeRun`/`AgentRun` begin/end) and per benign skip (tool nodes with no
   `llm_details`, deduplicated edges).
 - **`.debug`** — per-call summaries (`emit(data:)` node/edge/IO counts, parsed
   run/root counts).

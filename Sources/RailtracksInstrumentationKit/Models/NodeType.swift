@@ -9,7 +9,8 @@
 /// specially (Agent → purple/sparkles; everything else → blue/wrench).
 /// `.custom` preserves any other `node_type` a producer emits, so the value
 /// round-trips losslessly — though in Instruments a custom type renders like
-/// a Tool, with its real string shown in the Type columns.
+/// a Tool, with its real string shown in the Type columns (the Node Runs
+/// lane is the exception: it colors custom types green).
 ///
 /// `rawValue` is the on-the-wire string ("Agent" / "Tool" / the custom name),
 /// matching the schema's pattern literals verbatim — using the enum does not

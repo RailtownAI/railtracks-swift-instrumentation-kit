@@ -8,6 +8,9 @@
 //  start the interval and keep the returned `AgentRunHandle`; pass it
 //  back to `RailtracksSignposts.end(_:error:)` when the agent finishes.
 //
+//  Kept for older SDK versions. SDKs that emit one interval per node call
+//  (agent, tool, function) use `NodeRun` instead.
+//
 
 import Foundation
 import os.signpost
