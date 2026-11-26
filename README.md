@@ -206,6 +206,11 @@ the name: the kit sends where the bar goes as separate fields.
   log; don't pass secrets. Whitespace runs collapse to one space, and it is
   capped at 4096 UTF-8 bytes (4 KB, cut on a character boundary, ending in
   "…").
+- **Provider and model.** `provider` (such as `"OpenAI"`) and `model` (the
+  model ID, such as `"gpt-4o-mini"`) name the LLM behind an agent call. Both
+  default to `""`, and the kit sends an empty value as `-`, as `FlowIO` does.
+  Instruments shows them in the Provider and Model columns of the Node Runs
+  tables; tools and functions show `-`.
 - **Instructions.** `instructions` holds an agent's system instructions,
   sanitized, capped and public exactly like `input`. When it is non-empty,
   `begin` also opens a **NodeInstructions** interval next to the NodeRun, so
@@ -215,7 +220,7 @@ the name: the kit sends where the bar goes as separate fields.
 - **Field order.** The free text goes last, so a cut only ever costs its tail:
 
   ```text
-  NodeRun begin:          error=0 nodeId=… parentNodeId=… sessionId=… runId=… nodeType=… run=<NN> depth=<n> typeSlot=… parentName=… name=<name> input=<text>
+  NodeRun begin:          error=0 nodeId=… parentNodeId=… sessionId=… runId=… nodeType=… run=<NN> depth=<n> typeSlot=… model=<id|-> provider=<name|-> parentName=… name=<name> input=<text>
   NodeRun end:            error=<0|1> name=<name>
   NodeInstructions begin: nodeId=… typeSlot=… name=<name> instructions=<text>
   NodeInstructions end:   name=<name>
@@ -226,6 +231,12 @@ the name: the kit sends where the bar goes as separate fields.
   (`log stream`, Console) clips a message at about 1 KB; there the trailing
   text is cut short and ends in `<…>`, while `name=` and every field before it
   survive.
+- **Package compatibility.** The begin message must match the start pattern
+  of the Instruments package exactly, so use kit 1.2.0 or later with the
+  matching Railtracks Instrumentation package. An older Instruments package
+  shows empty Node Runs graphs for an app built with this kit. The matching
+  Instruments package shows empty Node Runs graphs for an app built with an
+  older kit.
 
 ```swift
 let agent = RailtracksSignposts.begin(NodeRun(
@@ -235,6 +246,8 @@ let agent = RailtracksSignposts.begin(NodeRun(
     parentNodeId: "",         // "" for a root call
     sessionId: session,
     runId: run,
+    provider: "OpenAI",       // "" (sent as "-") when the node has no LLM
+    model: "gpt-4o-mini",
     input: prompt,            // shown on hover; public in the unified log
     instructions: systemPrompt // opens a NodeInstructions interval when non-empty
 ))
@@ -288,7 +301,7 @@ JSON; use live emission when you control the agent code directly.
 | `FlowTreeNode`  | Flow Tree, Call Tree  | `nodeId`, `sessionId`, `runId`, `nodeType`, `name`                               |
 | `FlowGraphNode` | Flow Object Graph     | `nodeId`, `sessionId`, `runId`, `nodeType`, `name`                              |
 | `FlowIO`        | Tool I/O              | `nodeId`, `sessionId`, `runId`, `messageId`, `source`, `direction`, `role`, `displayRole`, `toolName`, `content` |
-| `NodeRun`       | Node Runs (timeline)  | `name`, `nodeType`; `nodeId`/`parentNodeId` for nesting (plus `sessionId`/`runId`/`parentName`/`input`/`instructions`) |
+| `NodeRun`       | Node Runs (timeline)  | `name`, `nodeType`; `nodeId`/`parentNodeId` for nesting (plus `sessionId`/`runId`/`parentName`/`provider`/`model`/`input`/`instructions`) |
 | `AgentRun`      | Agent Runs (timeline) | `name` (plus `nodeId`/`sessionId`/`runId`/`parentName` for correlation); older SDK versions |
 
 All other fields have defaults. Every event type is `Sendable` + `Codable`, so

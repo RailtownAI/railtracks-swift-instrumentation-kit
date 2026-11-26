@@ -300,3 +300,88 @@ struct RailtracksSignpostsNodeRunTests {
         #expect(second.typeSlot != first.typeSlot)
     }
 }
+
+/// The provider and model an agent call runs with, sent as their own fields
+/// so the Node Runs tables can show them as columns.
+@Suite("NodeRun provider and model")
+struct NodeRunProviderModelTests {
+
+    @Test("provider and model default to empty")
+    func defaultsAreEmpty() {
+        let event = NodeRun(name: "add", nodeType: .tool)
+        #expect(event.provider == "")
+        #expect(event.model == "")
+    }
+
+    @Test("explicit provider and model are kept")
+    func explicitValuesAreKept() {
+        let event = NodeRun(
+            name: "Math Agent", nodeType: .agent,
+            parentName: "Workflow", provider: "OpenAI", model: "gpt-4o-mini",
+            input: "2 + 3"
+        )
+        #expect(event.provider == "OpenAI")
+        #expect(event.model == "gpt-4o-mini")
+        #expect(event.parentName == "Workflow")
+        #expect(event.input == "2 + 3")
+    }
+
+    @Test("an empty value is sent as '-', any other value unchanged")
+    func dashRule() {
+        #expect(RailtracksSignposts.dashIfEmpty("") == "-")
+        #expect(RailtracksSignposts.dashIfEmpty("OpenAI") == "OpenAI")
+        #expect(RailtracksSignposts.dashIfEmpty("gpt-4o-mini") == "gpt-4o-mini")
+        #expect(RailtracksSignposts.dashIfEmpty(" ") == " ")
+    }
+
+    @Test("a payload without provider and model still decodes, with both empty")
+    func decodesLegacyPayload() throws {
+        let event = NodeRun(
+            name: "Math Agent", nodeType: .agent, nodeId: "ag",
+            provider: "OpenAI", model: "gpt-4o-mini", input: "2 + 3"
+        )
+        var object = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(event)) as? [String: Any]
+        )
+        #expect(object["provider"] as? String == "OpenAI")
+        object.removeValue(forKey: "provider")
+        object.removeValue(forKey: "model")
+        let legacy = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(NodeRun.self, from: legacy)
+        #expect(decoded.provider == "")
+        #expect(decoded.model == "")
+        #expect(decoded.name == "Math Agent")
+        #expect(decoded.nodeType == .agent)
+        #expect(decoded.nodeId == "ag")
+        #expect(decoded.input == "2 + 3")
+    }
+
+    @Test("provider and model survive an encode and decode round trip")
+    func roundTrip() throws {
+        let event = NodeRun(
+            name: "Math Agent", nodeType: .agent, provider: "OpenAI", model: "gpt-4o-mini"
+        )
+        let decoded = try JSONDecoder().decode(NodeRun.self, from: JSONEncoder().encode(event))
+        #expect(decoded == event)
+    }
+
+    @Test("begin accepts an agent with a provider and model and a tool without")
+    func beginWithProviderAndModel() {
+        let runId = UUID().uuidString
+        let agent = RailtracksSignposts.begin(NodeRun(
+            name: "Math Agent", nodeType: .agent, nodeId: "\(runId)-ag", runId: runId,
+            provider: "OpenAI", model: "gpt-4o-mini"
+        ))
+        let tool = RailtracksSignposts.begin(NodeRun(
+            name: "add", nodeType: .tool, nodeId: "\(runId)-t1",
+            parentNodeId: "\(runId)-ag", runId: runId, parentName: "Math Agent"
+        ))
+        defer {
+            RailtracksSignposts.end(tool)
+            RailtracksSignposts.end(agent)
+        }
+        #expect(agent.depth == 0)
+        #expect(tool.depth == 1)
+    }
+}

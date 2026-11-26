@@ -170,8 +170,8 @@ public enum RailtracksSignposts {
         log.trace("emit FlowIO tool=\(event.toolName) dir=\(event.direction) role=\(event.role)")
         let safeContent = sanitize(event.content.isEmpty ? "<empty>" : event.content)
         let safeRole = event.role.isEmpty ? "unknown" : event.role
-        let safeModel = event.model.isEmpty ? "-" : event.model
-        let safeProvider = event.provider.isEmpty ? "-" : event.provider
+        let safeModel = dashIfEmpty(event.model)
+        let safeProvider = dashIfEmpty(event.provider)
 
         signposter.emitEvent(
             "FlowIO",
@@ -278,7 +278,9 @@ public enum RailtracksSignposts {
         )
         let input = sanitizeNodeRunInput(event.input)
         let instructions = sanitizeNodeRunInput(event.instructions)
-        log.trace("begin NodeRun name=\(event.name) type=\(event.nodeType.rawValue) run=\(assignment.run) depth=\(assignment.depth) typeSlot=\(assignment.typeSlot) instructions=\(!instructions.isEmpty)")
+        let safeModel = dashIfEmpty(event.model)
+        let safeProvider = dashIfEmpty(event.provider)
+        log.trace("begin NodeRun name=\(event.name) type=\(event.nodeType.rawValue) model=\(safeModel) provider=\(safeProvider) run=\(assignment.run) depth=\(assignment.depth) typeSlot=\(assignment.typeSlot) instructions=\(!instructions.isEmpty)")
         let id = signposter.makeSignpostID()
         // Seed error=0 at begin for the same reason as AgentRun: an unset
         // unsigned column renders as UInt64.max while the interval is open.
@@ -301,6 +303,8 @@ public enum RailtracksSignposts {
             run=\(assignment.run, privacy: .public) \
             depth=\(assignment.depth, privacy: .public) \
             typeSlot=\(assignment.typeSlot, privacy: .public) \
+            model=\(safeModel, privacy: .public) \
+            provider=\(safeProvider, privacy: .public) \
             parentName=\(event.parentName, privacy: .public) \
             name=\(event.name, privacy: .public) \
             input=\(input, privacy: .public)
@@ -398,6 +402,15 @@ public enum RailtracksSignposts {
         // Do not leave a dangling space before the ellipsis.
         if kept.last == " " { kept.removeLast() }
         return kept + ellipsis
+    }
+
+    // MARK: - Empty-value fallback
+
+    /// The wire value for an optional label such as a model or provider:
+    /// `"-"` when empty, else the value unchanged. Used by FlowIO and
+    /// NodeRun, so their Model and Provider columns read the same.
+    static func dashIfEmpty(_ value: String) -> String {
+        value.isEmpty ? "-" : value
     }
 
     // MARK: - Internal

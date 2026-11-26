@@ -19,9 +19,9 @@ import os.signpost
 
 /// Metadata captured when a node call begins. `name` labels the bar and
 /// `nodeType` picks its color and per-type lane; `nodeId` / `parentNodeId`
-/// link the call to its caller's live interval, which sets its depth. The
-/// rest are correlation identifiers that surface as columns on the
-/// interval row.
+/// link the call to its caller's live interval, which sets its depth.
+/// `provider` and `model` name the LLM behind an agent call. The rest are
+/// correlation identifiers that surface as columns on the interval row.
 public struct NodeRun: Sendable, Codable, Equatable {
     public var name: String
     public var nodeType: NodeType
@@ -32,6 +32,14 @@ public struct NodeRun: Sendable, Codable, Equatable {
     public var sessionId: String
     public var runId: String
     public var parentName: String
+    /// The LLM provider behind an agent call, such as `"OpenAI"`, or `""`
+    /// for tools, functions and agents without one. Sent as `-` when empty,
+    /// and shown in the Provider column of the Node Runs tables.
+    public var provider: String
+    /// The model ID behind an agent call, such as `"gpt-4o-mini"`, or `""`
+    /// for tools, functions and agents without one. Sent as `-` when empty,
+    /// and shown in the Model column of the Node Runs tables.
+    public var model: String
     /// What the node received: the prompt for an agent,
     /// the arguments for a tool. Published as a public signpost string, so
     /// it is readable in the unified log (do not pass secrets). Whitespace
@@ -54,6 +62,8 @@ public struct NodeRun: Sendable, Codable, Equatable {
         sessionId: String = "",
         runId: String = "",
         parentName: String = "",
+        provider: String = "",
+        model: String = "",
         input: String = "",
         instructions: String = ""
     ) {
@@ -64,8 +74,27 @@ public struct NodeRun: Sendable, Codable, Equatable {
         self.sessionId = sessionId
         self.runId = runId
         self.parentName = parentName
+        self.provider = provider
+        self.model = model
         self.input = input
         self.instructions = instructions
+    }
+
+    /// Decodes `provider` and `model` as `""` when absent, so payloads
+    /// encoded before those fields existed still decode.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        nodeType = try container.decode(NodeType.self, forKey: .nodeType)
+        nodeId = try container.decode(String.self, forKey: .nodeId)
+        parentNodeId = try container.decode(String.self, forKey: .parentNodeId)
+        sessionId = try container.decode(String.self, forKey: .sessionId)
+        runId = try container.decode(String.self, forKey: .runId)
+        parentName = try container.decode(String.self, forKey: .parentName)
+        provider = try container.decodeIfPresent(String.self, forKey: .provider) ?? ""
+        model = try container.decodeIfPresent(String.self, forKey: .model) ?? ""
+        input = try container.decode(String.self, forKey: .input)
+        instructions = try container.decode(String.self, forKey: .instructions)
     }
 }
 
